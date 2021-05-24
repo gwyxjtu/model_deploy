@@ -1,8 +1,7 @@
 # encoding: utf-8
-"""
-@author: xyliao
-@contact: xyliao1993@qq.com
-"""
+import os
+import torch
+from net import get_model
 from utils.anchor_generator import generate_anchors
 from utils.anchor_decode import decode_bbox
 from utils.nms import single_class_non_max_suppression
@@ -15,6 +14,8 @@ import flask
 #import torch
 #import torch.nn.functional as F
 from PIL import Image
+from torchvision import transforms as T
+
 #from torch import nn
 #from torchvision import transforms as T
 #from torchvision.models import resnet50
@@ -22,7 +23,11 @@ from PIL import Image
 feature_map_sizes = [[33, 33], [17, 17], [9, 9], [5, 5], [3, 3]]
 anchor_sizes = [[0.04, 0.056], [0.08, 0.11], [0.16, 0.22], [0.32, 0.45], [0.64, 0.72]]
 anchor_ratios = [[1, 0.62, 0.42]] * 5
-
+transforms = T.Compose([
+    T.Resize(size=(288, 144)),
+    T.ToTensor(),
+    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
 # generate anchors
 anchors = generate_anchors(feature_map_sizes, anchor_sizes, anchor_ratios)
 id2class = {0: 'Mask', 1: 'NoMask'}
@@ -122,7 +127,37 @@ def prepare_image(image, target_size):
     if use_gpu:
         image = image.cuda()
     return torch.autograd.Variable(image, volatile=True)
+#---------------------------------
+def load_network(network):
+    save_path = os.path.join('./checkpoints', 'market', 'resnet50_nfc', 'net_last.pth')
+    network.load_state_dict(torch.load(save_path))
+    print('Resume model from {}'.format(save_path))
+    return network
 
+def load_image(src):
+    #src = Image.open(path)
+    src = transforms(Image.fromarray(src))
+    src = src.unsqueeze(dim=0)
+    return src
+
+class predict_decoder(object):
+
+    def __init__(self, dataset):
+        with open('./doc/label.json', 'r') as f:
+            self.label_list = json.load(f)[dataset]
+        with open('./doc/attribute.json', 'r') as f:
+            self.attribute_dict = json.load(f)[dataset]
+        self.dataset = dataset
+        self.num_label = len(self.label_list)
+
+    def decode(self, pred,data):
+        pred = pred.squeeze(dim=0)
+        for idx in range(self.num_label):
+            name, chooce = self.attribute_dict[self.label_list[idx]]
+            if chooce[pred[idx]]:
+                data[name] = chooce[pred[idx]]
+                print('{}: {}'.format(name, chooce[pred[idx]]))
+        return data
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -168,6 +203,22 @@ def predict():
     # Return the data dictionary as a JSON response.
     return flask.jsonify(data)
 
+@app.route("/apr", methods=["POST"])
+def apr():
+    data = {"success": False}
+    image = flask.request.files["image"].read()
+    image = Image.open(io.BytesIO(image))
+    #img = cv2.imread(args.img_path)
+    image = np.uint8(image)
+    model = get_model('resnet50_nfc', 30, False, 751)
+    model = load_network(model)
+    model.eval()
+    #torch.from_numpy(image[np.newaxis,:,:,:])
+    out = model.forward(load_image(image))
+    pred = torch.gt(out, torch.ones_like(out)/2 )  
+    dec = predict_decoder('market')
+    return dec.decode(pred,data)
+    #return 1
 
 if __name__ == '__main__':
     print("Loading PyTorch model and Flask starting server ...")
